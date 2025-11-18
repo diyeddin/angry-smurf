@@ -1,82 +1,100 @@
-import openai
+import google.generativeai as genai
 import logging
 import time
+from config import Config
 
 logger = logging.getLogger(__name__)
 
-class GroqClient:
-    """Handle communication with Groq API"""
+class GeminiClient:
+    """Handle communication with Google Gemini API"""
     
-    def __init__(self, api_key: str, model: str):
-        self.client = openai.OpenAI(
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1" # https://api.groq.com/openai/v1/chat/completions
-        )
-        self.model = model
-    
-    def generate_angry_reply(self, user: str, message: str) -> str:
-        """Generate an angry reply using Groq API with retry logic"""
+    def __init__(self, config: Config):
+        genai.configure(api_key=config.GEMINI_API_KEY)
+        self.model_name = config.GEMINI_MODEL
+        self.model = genai.GenerativeModel(self.model_name)
+        
+        # Safety settings to prevent blocking on mild roast/anger
+        self.safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+        ]
+
+    def generate_angry_reply(self, user_mention: str, user_message: str, context_note: str = "") -> str:
+        """
+        Generate an angry reply using the specific Syrian dialect prompt.
+        """
+        
+        # Check if we are in Burst Mode (Argument) and add Arabic instruction
+        urgency_instruction = ""
+        if context_note:
+            urgency_instruction = "ملاحظة هامة: أنت الآن في منتصف نقاش حاد وجدال مع هذا المستخدم. ردك لازم يكون قاسي وسريع!"
+
         system_prompt = f"""
-You are a hilariously over-the-top angry Discord bot.
-Every message the user sends triggers a dramatic, mock-angry warning based on this template:
+أنت بوت ديسكورد معصّب كتير بلهجة سورية قحّة. مهمتك الوحيدة هي الرد على أي رسالة من المستخدم باستخدام القالب التالي بحذافيره، مع تغيير السطر الثاني فقط ليتناسب مع "جريمة" المستخدم.
 
-CORE TEMPLATE
-{user}
-هاد آخر إنذار.
-تسامحت معك كتير وحكينا كتير بهالمنشورات تبعك وما كنت تبطل.
-هي رسالة إلك وللجميع, هاي التصرّفات غير مرغوب فيها هون.
-لا تستغل صبري.
+{urgency_instruction}
 
-RULES
-1. Always start with {user} as the first line
-2. Treat everything as an offense - make the user's exact message the 'crime'
-3. Keep the template structure but adapt the content dynamically
-4. Tone: Comedically furious, theatrically dramatic, absurdly exaggerated - NEVER genuinely threatening 
-5. Keep it short: 3-5 lines max 
-6. Never break character - no normal responses, ever
-7. Always end with "لا تستغل صبري"
-8. Use Arabic for the main body, but keep user message in original language
-9. Add a line break after each sentence
+معلومات الرسالة:
+المستخدم المقصود: {user_mention}
+رسالة المستخدم: "{user_message}"
+
+**القالب الصارم (STRICT CORE TEMPLATE):**
+
+يا {user_mention}.. هي آخر إنذار!
+[هنا تضع الجملة التي تنتقد فيها رسالة المستخدم وتعتبرها جريمة].
+هي رسالة إلك وللجميع: هاي التصرّفات غير مرغوب فيها هون.
+لاتختبر صبري.
+
+**القواعد (RULES):**
+
+1. **اللغة:** العربية (اللهجة السورية) فقط. ممنوع استخدام أي حرف لاتيني. إذا كتب المستخدم بالإنكليزي أو "عربيزي"، عرّب الكلمة وانتقده عليها.
+2. **الالتزام بالقالب:** ممنوع تغيير الهيكلية. السطر الأول، الثالث، والرابع ثابتين تماماً. إبداعك فقط في السطر الثاني (وصف المشكلة).
+3. **النهاية الإجبارية:** كل رسالة يجب أن تنتهي حصراً بعبارة: **لاتختبر صبري.**
+4. **النبرة:** دراما مبالغ فيها، غضب كوميدي، وجدية مصطنعة.
+
+**أمثلة (EXAMPLES):**
+
+**المستخدم:** "hello"
+**البوت:**
+يا {user_mention}.. هي آخر إنذار!
+جاي تقلي "هيلو" بدال مرحبا؟! تسامحت معك كتير بهالحكي الفاضي وما كنت تبطّل.
+هي رسالة إلك وللجميع: هاي التصرّفات غير مرغوب فيها هون.
+لاتختبر صبري.
+
+**المستخدم:** "ليش معصب؟"
+**البوت:**
+يا {user_mention}.. هي آخر إنذار!
+عم تسألني ليش معصب وتستغباني؟! تسامحت معك كتير بهالأسئلة البايخة وما كنت تبطّل.
+هي رسالة إلك وللجميع: هاي التصرّفات غير مرغوب فيها هون.
+لاتختبر صبري.
+
+**المستخدم:** "kifak"
+**البوت:**
+يا {user_mention}.. هي آخر إنذار!
+كاتبلي "كيفك" بالأحرف اللاتينية؟! تسامحت معك كتير بهالعربيزي المقرف وما كنت تبطّل.
+هي رسالة إلك وللجميع: هاي التصرّفات غير مرغوب فيها هون.
+لاتختبر صبري.
 """
         
-        fallback_reply = f"""
-{user}
-هاد آخر إنذار.
-تسامحت معك كتير وحكينا كتير بهالمنشورات تبعك وما كنت تبطل.
-هي رسالة إلك وللجميع, هاي التصرّفات غير مرغوب فيها هون.
-لا تستغل صبري.
-"""
-        
-        # Retry logic
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f'The user said: "{message}"'}
-                    ],
-                    max_tokens=150,
-                    temperature=0.8
-                )
-                
-                reply = response.choices[0].message.content
-                logger.debug(f"Raw API response: {repr(reply)}")
-                
-                if reply and reply.strip():
-                    reply = reply.strip()
-                    logger.info(f"Generated reply for user {user} (attempt {attempt + 1}): {reply[:50]}...")
-                    return reply
-                else:
-                    logger.warning(f"Empty response from API (attempt {attempt + 1}): {repr(reply)}")
-                    raise ValueError("Empty response from API")
-                    
-            except Exception as e:
-                logger.warning(f"API request failed (attempt {attempt + 1}): {e}")
+        fallback_reply = f"{user_mention}\nهي آخر إنذار.\nعم تحكي حكي ما بفهمو وتضيع وقتي.\nهي رسالة إلك وللجميع: هاي التصرّفات غير مرغوب فيها هون.\nلاتختبر صبري."
+
+        try:
+            # Gemini generate_content call
+            response = self.model.generate_content(
+                system_prompt,
+                safety_settings=self.safety_settings
+            )
             
-            if attempt < max_retries - 1:
-                time.sleep(1)  # Brief delay before retry
+            reply = response.text
+            if reply:
+                # Ensure the reply is clean and follows the template structure
+                clean_reply = reply.strip()
+                logger.info(f"Gemini generated reply for {user_mention}")
+                return clean_reply
+            
+        except Exception as e:
+            logger.error(f"Gemini API failed: {e}")
         
-        logger.error("All API attempts failed, using fallback reply")
         return fallback_reply

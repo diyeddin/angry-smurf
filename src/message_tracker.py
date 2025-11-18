@@ -6,71 +6,128 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 class MessageTracker:
-    """Track user messages, cooldowns, and cleanup old data"""
+    """
+    The Social Battery Engine.
+    Simulates a bot with a 'Tension Meter' that fills up based on chat activity,
+    mood, and personal grudges (Beef).
+    """
     
     def __init__(self, config):
         self.config = config
-        self.last_reply = 0
-        self.user_message_counts = defaultdict(int)
-        self.user_last_reply = defaultdict(int)
-        self.last_cleanup = time.time()
-    
-    def should_respond(self, user_id: int, force_respond: bool = False) -> tuple[bool, float]:
-        """Check if bot should respond and return (should_respond, chance)"""
-        now = time.time()
         
-        # Periodic cleanup
-        if now - self.last_cleanup > self.config.CLEANUP_INTERVAL:
-            self.cleanup_old_data()
+        # State Variables
+        self.tension_meter = 0.0
+        self.tension_threshold = 100.0  # Triggers when meter hits this
         
-        # Increment message count
-        self.user_message_counts[user_id] += 1
+        # Tracking Data
+        self.beef_ledger = defaultdict(int)  # {user_id: beef_level}
+        self.last_beef_decay = time.time()
         
-        # Calculate scaled chance
-        scaled_chance = self.config.BASE_CHANCE + self.user_message_counts[user_id] * self.config.SCALE_FACTOR
-        chance = min(scaled_chance, self.config.MAX_CHANCE)  # Use configurable cap
+        # Mood System
+        self.moods = {
+            "Zen": 0.5,      # Hard to trigger
+            "Normal": 1.0,   # Standard
+            "Cranky": 2.0,   # Easy to trigger
+            "Unhinged": 4.0  # Chaos mode
+        }
+        self.current_mood = "Normal"
+        self.last_mood_switch = time.time()
         
-        # If bot was mentioned, bypass all cooldowns and probability checks
-        if force_respond:
-            self.last_reply = now
-            self.user_last_reply[user_id] = now
-            self.user_message_counts[user_id] = 0  # Reset count after response
-            return True, 1.0  # Return 100% chance to indicate it was a mention
+        # Burst Mode (The Argument System)
+        self.burst_active = False
+        self.burst_target_id = None
+        self.burst_end_time = 0
+
+    def _update_mood(self):
+        """Rotates the bot's mood periodically"""
+        if time.time() - self.last_mood_switch > self.config.MOOD_SWITCH_INTERVAL:
+            self.current_mood = random.choice(list(self.moods.keys()))
+            self.last_mood_switch = time.time()
+            logger.info(f"🔄 Mood shifted to: {self.current_mood}")
+
+    def _update_beef_decay(self):
+        """Reduces beef scores over time so the bot forgives eventually"""
+        if time.time() - self.last_beef_decay > self.config.BEEF_DECAY_INTERVAL:
+            for user in list(self.beef_ledger.keys()):
+                if self.beef_ledger[user] > 0:
+                    self.beef_ledger[user] -= 1
+            self.last_beef_decay = time.time()
+
+    def process_message(self, user_id: int, message_content: str, is_mention: bool) -> dict:
+        """
+        Analyzes message and determines if bot should trigger.
+        Returns dict: {'trigger': bool, 'is_burst': bool}
+        """
+        self._update_mood()
+        self._update_beef_decay()
         
-        # Normal probability-based logic
-        # Check global cooldown
-        if now - self.last_reply < self.config.COOLDOWN:
-            return False, chance
+        # 1. CHECK BURST MODE (Argument Priority)
+        if self.burst_active:
+            # If the target replies while we are angry, reply back instantly
+            if user_id == self.burst_target_id:
+                self.burst_active = False # End burst (or flip coin to continue)
+                return {'trigger': True, 'is_burst': True}
+            
+            # If time ran out on burst mode
+            if time.time() > self.burst_end_time:
+                self.burst_active = False
+                self.burst_target_id = None
+
+        # 2. IMMEDIATE MENTION TRIGGER
+        if is_mention:
+            self._trigger_event(user_id)
+            return {'trigger': True, 'is_burst': False}
+
+        # 3. CALCULATE TENSION IMPACT
+        base_impact = random.randint(5, 10)
         
-        # Check per-user cooldown
-        if now - self.user_last_reply[user_id] < self.config.USER_COOLDOWN:
-            return False, chance
+        # Contextual Bonuses
+        context_bonus = 0
+        if len(message_content) > 200: context_bonus += 15   # Long rants annoy bot
+        if message_content.isupper(): context_bonus += 20    # Caps lock annoys bot
+        if "???" in message_content: context_bonus += 10     # Confusion annoys bot
         
-        # Roll the dice
-        if random.random() < chance:
-            self.last_reply = now
-            self.user_last_reply[user_id] = now
-            self.user_message_counts[user_id] = 0  # Reset count after response
-            return True, chance
+        # Beef Multiplier (Do we hate this user?)
+        user_beef_level = self.beef_ledger.get(user_id, 0)
+        beef_mult = 1.0 + (user_beef_level * 0.25) # +25% tension per beef level
         
-        return False, chance
-    
-    def cleanup_old_data(self):
-        """Clean up old user data to prevent memory bloat"""
-        current_time = time.time()
-        cutoff_time = current_time - (24 * 3600)  # Remove data older than 24 hours
+        # Mood Multiplier
+        mood_mult = self.moods[self.current_mood]
         
-        # Clean up old user reply times
-        old_users = [user_id for user_id, last_time in self.user_last_reply.items() 
-                     if last_time < cutoff_time]
+        # Final Tension Math
+        total_impact = (base_impact + context_bonus) * beef_mult * mood_mult
+        self.tension_meter += total_impact
         
-        for user_id in old_users:
-            if user_id in self.user_last_reply:
-                del self.user_last_reply[user_id]
-            if user_id in self.user_message_counts:
-                del self.user_message_counts[user_id]
+        # Log status occasionally
+        if random.random() < 0.1:
+            logger.info(f"🔋 Tension: {self.tension_meter:.1f}/{self.tension_threshold} | Mood: {self.current_mood}")
+
+        # 4. CHECK THRESHOLD
+        if self.tension_meter >= self.tension_threshold:
+            self._trigger_event(user_id)
+            return {'trigger': True, 'is_burst': False}
+            
+        return {'trigger': False, 'is_burst': False}
+
+    def _trigger_event(self, user_id):
+        """Resets tension and sets up next trigger state"""
+        # Reset Meter
+        self.tension_meter = 0
+        # Randomize next threshold (80-150) so it's unpredictable
+        self.tension_threshold = random.randint(80, 150)
         
-        if old_users:
-            logger.info(f"Cleaned up data for {len(old_users)} inactive users")
+        # Add Beef to the victim
+        self.beef_ledger[user_id] += 1
+        logger.info(f"🔥 TRIGGERED against user {user_id}. Their Beef level is now {self.beef_ledger[user_id]}")
         
-        self.last_cleanup = current_time
+        # Chance to enter Burst Mode (Argument Mode)
+        # If we are Crank/Unhinged, higher chance to argue
+        burst_chance = 0.3
+        if self.current_mood in ["Cranky", "Unhinged"]:
+            burst_chance = 0.6
+            
+        if random.random() < burst_chance:
+            self.burst_active = True
+            self.burst_target_id = user_id
+            self.burst_end_time = time.time() + 60 # Lasts 60 seconds
+            logger.info("💢 Entered BURST MODE (Argument expected)")
